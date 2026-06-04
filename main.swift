@@ -1,14 +1,65 @@
 //
 //  main.swift
-//  GaussianSplattingMetal
+//  Gaussian Splatting Metal - Render Accuracy Test
 //
 //
 
 import Foundation
 import Metal
 import simd
+import AppKit  // For NSImage and saving PNG
 
-// MARK: - Performance Test
+// MARK: - Save Texture to PNG
+func saveTextureAsPNG(_ texture: MTLTexture, to url: URL) {
+    let width = texture.width
+    let height = texture.height
+    let bytesPerRow = width * 4 // BGRA8Unorm
+    let bufferSize = bytesPerRow * height
+    
+    // Create staging buffer
+    let stagingBuffer = texture.device.makeBuffer(length: bufferSize, options: .storageModeShared)!
+    
+    // Create command buffer and blit encoder
+    let commandBuffer = texture.device.makeCommandQueue()!.makeCommandBuffer()!
+    let blitEncoder = commandBuffer.makeBlitCommandEncoder()!
+    
+    let origin = MTLOrigin(x: 0, y: 0, z: 0)
+    let size = MTLSize(width: width, height: height, depth: 1)
+    
+    blitEncoder.copy(from: texture, sourceSlice: 0, sourceLevel: 0,
+                     sourceOrigin: origin, sourceSize: size,
+                     to: stagingBuffer, destinationOffset: 0,
+                     destinationBytesPerRow: bytesPerRow,
+                     destinationBytesPerImage: bufferSize)
+    blitEncoder.endEncoding()
+    
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    
+    // Create bitmap context
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+    
+    if let context = CGContext(data: stagingBuffer.contents(),
+                               width: width,
+                               height: height,
+                               bitsPerComponent: 8,
+                               bytesPerRow: bytesPerRow,
+                               space: colorSpace,
+                               bitmapInfo: bitmapInfo.rawValue),
+       let cgImage = context.makeImage() {
+        // Create NSImage and save
+        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+        if let tiffData = nsImage.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiffData),
+           let pngData = bitmap.representation(using: .png, properties: [:]) {
+            try? pngData.write(to: url)
+            print("✅ Saved PNG to: \(url.path)")
+        }
+    }
+}
+
+// MARK: - Performance Test with PNG Save
 let device = MTLCreateSystemDefaultDevice()!
 let commandQueue = device.makeCommandQueue()!
 let width = 1280, height = 720
@@ -29,7 +80,7 @@ rpd.colorAttachments[0].texture = texture
 rpd.colorAttachments[0].loadAction = .clear
 rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 1)
 
-// Compile shaders with TINY POINT SIZE for max FPS!
+// Compile shaders for accurate Gaussian rendering (with blending and proper fragment shader)
 let metalSource = """
 #include <metal_stdlib>
 using namespace metal;
@@ -47,9 +98,12 @@ struct VertexOut {
     float alpha;
 };
 
+// Accurate Gaussian fragment shader
 fragment float4 gaussianFragment(VertexOut in [[stage_in]], float2 pointCoord [[point_coord]]) {
-    // Super simple fragment shader for max FPS!
-    return float4(in.color * in.alpha, in.alpha);
+    float2 uv = (pointCoord - 0.5f) * 2.0f;
+    float dist2 = dot(uv, uv);
+    float alpha = exp(-2.0f * dist2) * in.alpha;
+    return float4(in.color * alpha, alpha);
 }
 
 vertex VertexOut gaussianVertex(
@@ -65,7 +119,7 @@ vertex VertexOut gaussianVertex(
     float4 posClip = (*projectionMatrix) * posView;
     
     out.position = posClip;
-    out.pointSize = 1.0f; // MINI for max FPS!
+    out.pointSize = 8.0f;  // Visible size for accuracy check
     out.alpha = g.opacity;
     out.color = g.color;
     
@@ -76,20 +130,20 @@ let library = try! device.makeLibrary(source: metalSource, options: nil)
 let vertexFunc = library.makeFunction(name: "gaussianVertex")!
 let fragmentFunc = library.makeFunction(name: "gaussianFragment")!
 
-// Create pipeline state
+// Create pipeline state with blending enabled for accurate rendering
 let pipelineDesc = MTLRenderPipelineDescriptor()
 pipelineDesc.vertexFunction = vertexFunc
 pipelineDesc.fragmentFunction = fragmentFunc
 pipelineDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
-pipelineDesc.colorAttachments[0].isBlendingEnabled = false
+pipelineDesc.colorAttachments[0].isBlendingEnabled = true
 pipelineDesc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
 pipelineDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
 pipelineDesc.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
 pipelineDesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
 let pipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDesc)
 
-// Create gaussian data - 1 MILLION!
-let gaussianCount = 1_000_000
+// Create Gaussian test data (structured for visibility)
+let gaussianCount = 100_000  // Use fewer for visibility
 struct Gaussian {
     var position: SIMD3<Float>
     var color: SIMD3<Float>
@@ -97,30 +151,38 @@ struct Gaussian {
 }
 var gaussians: [Gaussian] = []
 gaussians.reserveCapacity(gaussianCount)
-for _ in 0..<gaussianCount {
+
+// Create a spiral pattern for better visibility
+for i in 0..<gaussianCount {
+    let t = Float(i) / Float(gaussianCount)
+    let radius = t * 2.0
+    let angle = t * 8.0 * Float.pi
+    let x = radius * cos(angle)
+    let y = sin(Float(i) * 0.1) * 0.5
+    let z = 4.0 + t * 2.0
+    
+    let hue = t
+    let rgbColor = SIMD3(
+        abs(sin(hue * 2.0 * Float.pi)),
+        abs(sin((hue + 0.33) * 2.0 * Float.pi)),
+        abs(sin((hue + 0.66) * 2.0 * Float.pi))
+    )
+    
     gaussians.append(Gaussian(
-        position: SIMD3(
-            Float.random(in: -2.0...2.0),
-            Float.random(in: -2.0...2.0),
-            Float.random(in: 2.0...6.0)
-        ),
-        color: SIMD3(
-            Float.random(in: 0.3...1.0),
-            Float.random(in: 0.2...1.0),
-            Float.random(in: 0.3...0.9)
-        ),
-        opacity: Float.random(in: 0.3...0.8)
+        position: SIMD3(x, y, z),
+        color: rgbColor,
+        opacity: 0.6
     ))
 }
 
-// Create buffer
+// Create buffers
 let gaussianBuffer = device.makeBuffer(
     bytes: gaussians,
     length: gaussianCount * MemoryLayout<Gaussian>.stride,
     options: .storageModeShared
 )!
 
-// Use triple buffering
+// Use triple buffering for view matrices
 let numBuffersInFlight = 3
 var viewMatrixBuffers: [MTLBuffer] = []
 for _ in 0..<numBuffersInFlight {
@@ -135,7 +197,7 @@ for _ in 0..<numBuffersInFlight {
 
 // Projection matrix
 let aspect = Float(width) / Float(height)
-let fov = Float.pi / 3, near: Float = 0.1, far: Float = 100
+let fov = Float.pi / 3, near: Float = 0.1, far: Float = 100.0
 let yScale = 1 / tan(fov * 0.5), xScale = yScale / aspect
 var projMat = simd_float4x4()
 projMat.columns.0 = [xScale, 0, 0, 0]
@@ -148,64 +210,29 @@ let projBuffer = device.makeBuffer(
     options: .storageModeShared
 )!
 
-// Warmup
-for i in 0..<10 {
-    let bufferIndex = i % numBuffersInFlight
-    let angle = Float(i) * 0.01
-    var vm = simd_float4x4()
-    vm.columns.0 = [cos(angle), 0, -sin(angle), 0]
-    vm.columns.1 = [0, 1, 0, 0]
-    vm.columns.2 = [sin(angle),0, cos(angle), 0]
-    vm.columns.3 = [0, 0, -4, 1]
-    memcpy(viewMatrixBuffers[bufferIndex].contents(), &vm, MemoryLayout<simd_float4x4>.stride)
-    
-    let cb = commandQueue.makeCommandBuffer()!
-    let re = cb.makeRenderCommandEncoder(descriptor: rpd)!
-    re.setRenderPipelineState(pipelineState)
-    re.setVertexBuffer(gaussianBuffer, offset: 0, index:0)
-    re.setVertexBuffer(viewMatrixBuffers[bufferIndex], offset:0, index:1)
-    re.setVertexBuffer(projBuffer, offset:0, index:2)
-    re.drawPrimitives(type: .point, vertexStart:0, vertexCount: gaussianCount)
-    re.endEncoding()
-    cb.commit()
-    cb.waitUntilCompleted()
-}
+// Render 1 test image and save it
+let bufferIndex = 0
+let angle = Float.pi / 4.0
+var vm = simd_float4x4()
+vm.columns.0 = [cos(angle), 0, -sin(angle), 0]
+vm.columns.1 = [0, 1, 0, 0]
+vm.columns.2 = [sin(angle), 0, cos(angle), 0]
+vm.columns.3 = [0, 0, -4, 1]
+memcpy(viewMatrixBuffers[bufferIndex].contents(), &vm, MemoryLayout<simd_float4x4>.stride)
 
-// Measure performance
-let numFrames = 200
-let startTime = CFAbsoluteTimeGetCurrent()
+let cb = commandQueue.makeCommandBuffer()!
+let re = cb.makeRenderCommandEncoder(descriptor: rpd)!
+re.setRenderPipelineState(pipelineState)
+re.setVertexBuffer(gaussianBuffer, offset: 0, index:0)
+re.setVertexBuffer(viewMatrixBuffers[bufferIndex], offset:0, index:1)
+re.setVertexBuffer(projBuffer, offset:0, index:2)
+re.drawPrimitives(type: .point, vertexStart:0, vertexCount: gaussianCount)
+re.endEncoding()
+cb.commit()
+cb.waitUntilCompleted()
 
-for i in 0..<numFrames {
-    let bufferIndex = i % numBuffersInFlight
-    let angle = Float(i) * 0.01
-    var vm = simd_float4x4()
-    vm.columns.0 = [cos(angle), 0, -sin(angle), 0]
-    vm.columns.1 = [0, 1, 0, 0]
-    vm.columns.2 = [sin(angle),0, cos(angle), 0]
-    vm.columns.3 = [0, 0, -4, 1]
-    memcpy(viewMatrixBuffers[bufferIndex].contents(), &vm, MemoryLayout<simd_float4x4>.stride)
-    
-    let cb = commandQueue.makeCommandBuffer()!
-    let re = cb.makeRenderCommandEncoder(descriptor: rpd)!
-    re.setRenderPipelineState(pipelineState)
-    re.setVertexBuffer(gaussianBuffer, offset: 0, index:0)
-    re.setVertexBuffer(viewMatrixBuffers[bufferIndex], offset:0, index:1)
-    re.setVertexBuffer(projBuffer, offset:0, index:2)
-    re.drawPrimitives(type: .point, vertexStart:0, vertexCount: gaussianCount)
-    re.endEncoding()
-    cb.commit()
-}
-let lastCB = commandQueue.makeCommandBuffer()!
-lastCB.commit()
-lastCB.waitUntilCompleted()
-let endTime = CFAbsoluteTimeGetCurrent()
+// Save the texture to a PNG file
+let outputURL = URL(fileURLWithPath: "/Volumes/KIOXIA/testGSmetal/render-accuracy-test.png")
+saveTextureAsPNG(texture, to: outputURL)
 
-let totalTime = endTime - startTime
-let fps = Double(numFrames) / totalTime
-
-print("Test complete: \(gaussianCount) Gaussians, \(width)x\(height)")
-print("Average FPS: \(String(format: "%.1f", fps))")
-
-if fps >= 100 {
-    print("\n✅ SUCCESS: Achieved target performance of 100+ FPS!")
-}
+print("\n✅ Rendering accuracy test complete!")
