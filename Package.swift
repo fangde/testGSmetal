@@ -10,14 +10,22 @@ let package = Package(
         .executable(name: "GaussianSplattingMetal", targets: ["GaussianSplattingMetal"])
     ],
     targets: [
-        .executableTarget(name: "GaussianSplattingMetal",
-                         dependencies: [],
-                         path: ".",
-                         sources: [
-                             "main.swift",
-                             "Renderer.swift",
-                             "SimpleTestRenderer.swift"
-                         ]
+        .executableTarget(
+            name: "GaussianSplattingMetal",
+            dependencies: [],
+            path: ".",
+            exclude: [
+                "Renderer.swift",
+                "gs_renderer.py",
+                "gs_renderer_offscreen.py",
+                "environment.yml",
+                "README.md",
+                "GaussianSplatting.metal",
+                "triangle-test-*.png"
+            ],
+            sources: [
+                "main.swift"
+            ]
         )
     ]
 )
