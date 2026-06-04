@@ -1,0 +1,12 @@
+name: gs-metal
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - pip
+  - pip:
+    - pyobjc-framework-Metal
+    - pyobjc-framework-MetalKit
+    - pyobjc-framework-Cocoa
