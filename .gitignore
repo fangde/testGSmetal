@@ -4,6 +4,8 @@
 
 # Test rendering output
 triangle-test-*.png
+test-*.png
+render-accuracy-test.png
 
 # Temporary files
 *.swp
