@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version:5.9
 import PackageDescription
 
 let package = Package(
@@ -7,28 +7,17 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .executable(
-            name: "GaussianSplattingMetal",
-            targets: ["GaussianSplattingMetal"]
-        )
+        .executable(name: "GaussianSplattingMetal", targets: ["GaussianSplattingMetal"])
     ],
     targets: [
-        .executableTarget(
-            name: "GaussianSplattingMetal",
-            dependencies: [],
-            path: ".",
-            exclude: [
-                "environment.yml",
-                "gs_renderer.py",
-                "README.md"
-            ],
-            sources: [
-                "main.swift",
-                "Renderer.swift"
-            ],
-            resources: [
-                .process("GaussianSplatting.metal")
-            ]
+        .executableTarget(name: "GaussianSplattingMetal",
+                         dependencies: [],
+                         path: ".",
+                         sources: [
+                             "main.swift",
+                             "Renderer.swift",
+                             "SimpleTestRenderer.swift"
+                         ]
         )
     ]
 )

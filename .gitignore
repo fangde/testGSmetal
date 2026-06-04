@@ -80,3 +80,6 @@ iOSInjectionProject/
 # macOS metadata files
 ._*
 .DS_Store
+
+# Temporary directory for pymetal-cpp reference
+temp-pymetal/

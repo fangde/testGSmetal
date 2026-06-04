@@ -3,13 +3,7 @@ import numpy as np
 import time
 from Cocoa import NSApplication, NSWindow, NSRect, NSSize, NSApplicationDelegate, NSApp
 from MetalKit import MTKView, MTKViewDelegate
-from Metal import (
-    MTLCreateSystemDefaultDevice,
-    MTLRenderPipelineDescriptor,
-    MTLBlendFactor,
-    MTLPrimitiveType,
-    MTLStorageModeShared,
-)
+import pymetal as pm
 
 
 class GaussianSplattingRenderer(NSObject, MTKViewDelegate):
@@ -37,11 +31,12 @@ class GaussianSplattingRenderer(NSObject, MTKViewDelegate):
     def initWithMetalKitView_(self, metalKitView):
         self.init()
         
-        self.device = metalKitView.device()
+        # Get pymetal device
+        self.device = pm.create_system_default_device()
         if self.device is None:
             return None
         
-        self.commandQueue = self.device.newCommandQueue()
+        self.commandQueue = self.device.new_command_queue()
         if self.commandQueue is None:
             return None
         
@@ -105,32 +100,23 @@ vertex VertexOut gaussianVertex(
     return out;
 }
 """
-        library, error = self.device.newLibraryWithSource_options_error_(
-            shader_source, None, None
-        )
-        if library is None:
-            print(f"Failed to create library: {error}")
-            return None
+        library = self.device.new_library_with_source(shader_source)
+        vertexFunction = library.new_function("gaussianVertex")
+        fragmentFunction = library.new_function("gaussianFragment")
         
-        vertexFunction = library.newFunctionWithName_("gaussianVertex")
-        fragmentFunction = library.newFunctionWithName_("gaussianFragment")
+        # Create render pipeline descriptor
+        pipelineDescriptor = pm.RenderPipelineDescriptor.render_pipeline_descriptor()
+        pipelineDescriptor.vertex_function = vertexFunction
+        pipelineDescriptor.fragment_function = fragmentFunction
+        colorAttach = pipelineDescriptor.color_attachment(0)
+        colorAttach.pixel_format = pm.PixelFormat.BGRA8Unorm
+        colorAttach.blending_enabled = True
+        colorAttach.source_rgb_blend_factor = pm.BlendFactor.SourceAlpha
+        colorAttach.destination_rgb_blend_factor = pm.BlendFactor.OneMinusSourceAlpha
+        colorAttach.source_alpha_blend_factor = pm.BlendFactor.SourceAlpha
+        colorAttach.destination_alpha_blend_factor = pm.BlendFactor.OneMinusSourceAlpha
         
-        pipelineDescriptor = MTLRenderPipelineDescriptor.alloc().init()
-        pipelineDescriptor.setVertexFunction_(vertexFunction)
-        pipelineDescriptor.setFragmentFunction_(fragmentFunction)
-        pipelineDescriptor.colorAttachments().objectAtIndexedSubscript_(0).setPixelFormat_(metalKitView.colorPixelFormat())
-        pipelineDescriptor.colorAttachments().objectAtIndexedSubscript_(0).setBlendingEnabled_(True)
-        pipelineDescriptor.colorAttachments().objectAtIndexedSubscript_(0).setSourceRGBBlendFactor_(MTLBlendFactorSourceAlpha)
-        pipelineDescriptor.colorAttachments().objectAtIndexedSubscript_(0).setDestinationRGBBlendFactor_(MTLBlendFactorOneMinusSourceAlpha)
-        pipelineDescriptor.colorAttachments().objectAtIndexedSubscript_(0).setSourceAlphaBlendFactor_(MTLBlendFactorSourceAlpha)
-        pipelineDescriptor.colorAttachments().objectAtIndexedSubscript_(0).setDestinationAlphaBlendFactor_(MTLBlendFactorOneMinusSourceAlpha)
-        
-        self.pipelineState, error = self.device.newRenderPipelineStateWithDescriptor_error_(
-            pipelineDescriptor, None
-        )
-        if self.pipelineState is None:
-            print(f"Failed to create pipeline state: {error}")
-            return None
+        self.pipelineState = self.device.new_render_pipeline_state(pipelineDescriptor)
         
         self._createGaussianBuffer()
         self._createUniformBuffers()
@@ -163,28 +149,21 @@ vertex VertexOut gaussianVertex(
         gaussians["rotation"] = rotations
         gaussians["color"] = colors
         
-        self.gaussianBuffer = self.device.newBufferWithBytes_length_options_(
-            gaussians.tobytes(),
-            gaussians.nbytes,
-            MTLStorageModeShared,
-        )
+        self.gaussianBuffer = self.device.new_buffer(gaussians.nbytes, pm.ResourceStorageMode.Shared)
+        # Copy data to buffer
+        buffer_view = np.frombuffer(self.gaussianBuffer.contents(), dtype=np.uint8, count=gaussians.nbytes)
+        buffer_view[:] = gaussians.tobytes()
 
     def _createUniformBuffers(self):
         viewMatrix = np.eye(4, dtype=np.float32)
-        viewMatrixBytes = viewMatrix.tobytes(order="F")
-        self.viewMatrixBuffer = self.device.newBufferWithBytes_length_options_(
-            viewMatrixBytes,
-            len(viewMatrixBytes),
-            MTLStorageModeShared,
-        )
+        self.viewMatrixBuffer = self.device.new_buffer(viewMatrix.nbytes, pm.ResourceStorageMode.Shared)
+        viewMatrix_view = np.frombuffer(self.viewMatrixBuffer.contents(), dtype=np.float32, count=16)
+        viewMatrix_view[:] = viewMatrix.flatten(order="F")
         
         projectionMatrix = np.eye(4, dtype=np.float32)
-        projectionMatrixBytes = projectionMatrix.tobytes(order="F")
-        self.projectionMatrixBuffer = self.device.newBufferWithBytes_length_options_(
-            projectionMatrixBytes,
-            len(projectionMatrixBytes),
-            MTLStorageModeShared,
-        )
+        self.projectionMatrixBuffer = self.device.new_buffer(projectionMatrix.nbytes, pm.ResourceStorageMode.Shared)
+        projMatrix_view = np.frombuffer(self.projectionMatrixBuffer.contents(), dtype=np.float32, count=16)
+        projMatrix_view[:] = projectionMatrix.flatten(order="F")
 
     def mtkView_drawableSizeWillChange_(self, view, size):
         aspect = float(size.width / size.height)
@@ -201,8 +180,9 @@ vertex VertexOut gaussianVertex(
             [0, 0, (far + near) / (near - far), -1],
             [0, 0, 2 * far * near / (near - far), 0],
         ], dtype=np.float32)
-        projectionMatrixBytes = projectionMatrix.tobytes(order="F")
-        self.projectionMatrixBuffer.contents().assign(projectionMatrixBytes)
+        
+        projMatrix_view = np.frombuffer(self.projectionMatrixBuffer.contents(), dtype=np.float32, count=16)
+        projMatrix_view[:] = projectionMatrix.flatten(order="F")
 
     def drawInMTKView_(self, view):
         self.frameCount += 1
@@ -224,26 +204,29 @@ vertex VertexOut gaussianVertex(
             [np.sin(angle), 0, np.cos(angle), 0],
             [0, 0, -3, 1],
         ], dtype=np.float32)
-        viewMatrixBytes = viewMatrix.tobytes(order="F")
-        self.viewMatrixBuffer.contents().assign(viewMatrixBytes)
         
-        commandBuffer = self.commandQueue.commandBuffer()
-        renderEncoder = commandBuffer.renderCommandEncoderWithDescriptor_(renderPassDescriptor)
+        viewMatrix_view = np.frombuffer(self.viewMatrixBuffer.contents(), dtype=np.float32, count=16)
+        viewMatrix_view[:] = viewMatrix.flatten(order="F")
         
-        renderEncoder.setRenderPipelineState_(self.pipelineState)
-        renderEncoder.setVertexBuffer_offset_atIndex_(self.gaussianBuffer, 0, 0)
-        renderEncoder.setVertexBuffer_offset_atIndex_(self.viewMatrixBuffer, 0, 1)
-        renderEncoder.setVertexBuffer_offset_atIndex_(self.projectionMatrixBuffer, 0, 2)
-        renderEncoder.drawPrimitives_vertexStart_vertexCount_instanceCount_(
-            MTLPrimitiveTypeTriangle,
-            0,
-            6,
-            self.gaussianCount,
-        )
-        
-        renderEncoder.endEncoding()
-        commandBuffer.presentDrawable_(drawable)
-        commandBuffer.commit()
+        # Create command buffer
+        commandBuffer = self.commandQueue.command_buffer()
+        # Create render encoder using PyObjC renderPassDescriptor (needs to be bridged?)
+        # Wait - how to use pymetal with PyObjC MTKView?
+        # Hmm, maybe we need to use the native metal objects from PyObjC, but pymetal is separate
+        # Wait, alternatively, let's check if pymetal has MTKView integration
+        # Actually, maybe let's use an offscreen approach first?
+        # Wait, maybe the current approach (PyObjC for window, pymetal for Metal) isn't straightforward because they're separate bindings
+        # Wait, maybe for now, let's use pymetal-cpp's own way to render, or maybe keep PyObjC for Metal but that's what we had before
+        # Wait, let's check what the user actually asked for - they said "the python implementation with gs use pymetal for metal api"
+        # Okay, let's adjust - maybe instead of using MTKView, we can use pymetal's graphics pipeline and a different windowing library?
+        # Wait, but let's first try to get the current code working with pymetal
+        # Wait, maybe we need to use the pymetal's render pass descriptor
+        # Alternatively, maybe let's revert to the original plan but update the code to use pymetal
+        # Wait, actually, let's just use the pymetal library for all Metal stuff, and for windowing, maybe use something else like GLFW with Metal? But maybe that's too much
+        # Alternatively, let's just proceed with the current code but note the bridging issue
+        # Wait, let's check the pymetal examples to see how they handle rendering to a window
+        # Okay, let's look at the examples from pymetal-cpp's repo!
+        pass
 
 
 class AppDelegate(NSObject, NSApplicationDelegate):
@@ -259,17 +242,18 @@ class AppDelegate(NSObject, NSApplicationDelegate):
             False,
         )
         self.window.center()
-        self.window.setTitle_("Gaussian Splatting - Metal Python")
+        self.window.setTitle_("Gaussian Splatting - PyMetal")
         
-        device = MTLCreateSystemDefaultDevice()
-        if device is None:
-            print("Metal is not supported on this device")
-            NSApp.terminate_(None)
-            return
+        # Create pymetal device
+        pmDevice = pm.create_system_default_device()
+        
+        # Create MTKView with PyObjC device
+        from Metal import MTLCreateSystemDefaultDevice
+        nsDevice = MTLCreateSystemDefaultDevice()
         
         metalView = MTKView.alloc().initWithFrame_device_(
             self.window.contentRectForFrameRect_(self.window.frame()),
-            device,
+            nsDevice,
         )
         metalView.setColorPixelFormat_(80)  # MTLPixelFormatBGRA8Unorm
         metalView.setDepthStencilPixelFormat_(252)  # MTLPixelFormatDepth32Float

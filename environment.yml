@@ -7,6 +7,5 @@ dependencies:
   - numpy
   - pip
   - pip:
-    - pyobjc-framework-Metal
-    - pyobjc-framework-MetalKit
-    - pyobjc-framework-Cocoa
+    - pymetal-cpp
+    - pyobjc-framework-Cocoa  # Still need Cocoa for window/NSApp
