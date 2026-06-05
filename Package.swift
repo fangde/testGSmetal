@@ -18,13 +18,18 @@ let package = Package(
                 "Renderer.swift",
                 "gs_renderer.py",
                 "gs_renderer_offscreen.py",
+                "test_rendering.py",
                 "environment.yml",
                 "README.md",
                 "GaussianSplatting.metal",
-                "triangle-test-*.png"
+                "docs",
+                "render-accuracy-test.png",
+                ".gitignore"
             ],
             sources: [
-                "main.swift"
+                "GaussianRenderer.swift",
+                "MetalView.swift",
+                "GaussianSplattingApp.swift"
             ]
         )
     ]
