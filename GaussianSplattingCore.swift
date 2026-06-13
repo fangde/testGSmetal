@@ -93,7 +93,7 @@ vertex VertexOut gaussianVertexOptimized(
     float4 viewPos4 = viewProj * g.position;
     float invW = 1.0 / viewPos4.w;
     
-    // Quad size reduced to minimize overdraw (0.5 instead of 0.8)
+    // Quad size: balance between coverage and overdraw (0.5 * scale)
     float quadSize = g.scale.x * 0.5;
     float2 quadOffset = corner * quadSize;
     
