@@ -9,7 +9,8 @@ let package = Package(
     ],
     products: [
         .executable(name: "GaussianSplattingMetal", targets: ["GaussianSplattingMetal"]),
-        .executable(name: "GSOffscreen", targets: ["GSOffscreen"])
+        .executable(name: "GSOffscreen", targets: ["GSOffscreen"]),
+        .executable(name: "BenchmarkTest", targets: ["BenchmarkTest"])
     ],
     targets: [
         // ------- Shared rendering core (used by both executables) -------
@@ -21,6 +22,7 @@ let package = Package(
                 "GaussianRenderer.swift",
                 "GaussianSplattingApp.swift",
                 "MetalView.swift",
+                "MetalViewSwiftUICompositionBenchmark.swift",
 
                 // CLI files (not in core)
                 "OffscreenRenderer.swift",
@@ -97,7 +99,8 @@ let package = Package(
             sources: [
                 "GaussianRenderer.swift",
                 "GaussianSplattingApp.swift",
-                "MetalView.swift"
+                "MetalView.swift",
+                "MetalViewSwiftUICompositionBenchmark.swift"
             ]
         ),
 
@@ -111,6 +114,7 @@ let package = Package(
                 "GaussianRenderer.swift",
                 "GaussianSplattingApp.swift",
                 "MetalView.swift",
+                "MetalViewSwiftUICompositionBenchmark.swift",
 
                 // Core (included via dependency)
                 "GaussianSplattingCore.swift",
@@ -144,6 +148,55 @@ let package = Package(
                 "OffscreenRenderer.swift",
                 "main.swift"
             ]
+        ),
+
+        // ------- Benchmark test runner -------
+        .executableTarget(
+            name: "BenchmarkTest",
+            dependencies: ["GaussianSplattingCore"],
+            path: ".",
+            exclude: [
+                // SwiftUI app files
+                "GaussianRenderer.swift",
+                "GaussianSplattingApp.swift",
+                "MetalView.swift",
+                "MetalViewSwiftUICompositionBenchmark.swift",
+
+                // Core (included via dependency)
+                "GaussianSplattingCore.swift",
+
+                // CLI files
+                "main.swift",
+
+                // Legacy / reference
+                "Renderer.swift",
+                "SimpleRenderer.swift",
+                "SimpleShader.metal",
+                "SimpleMetalView.swift",
+                "SimpleMetalExampleView.swift",
+
+                // Output files
+                "output.png",
+
+                // Python
+                "gs_renderer.py",
+                "gs_renderer_offscreen.py",
+                "test_rendering.py",
+                "environment.yml",
+
+                // Docs / images
+                "README.md",
+                "docs",
+                "offscreen_render_plan.md",
+                "python_bindings_plan.md",
+                "screenshot.png",
+                ".gitignore"
+            ],
+            sources: [
+                "BenchmarkTestRunner.swift"
+            ]
         )
     ]
 )
+
+// ===== Benchmark test target =====
