@@ -47,12 +47,23 @@ public class OffscreenRenderer {
     
     /// Gaussian buffer
     var gaussianBuffer: MTLBuffer?
-    
+
     /// Number of Gaussians
     public var gaussianCount: Int = 100_000
-    
+
     /// Last rendered texture (for PNG export)
     var lastRenderedTexture: MTLTexture?
+
+    /// Cached texture for repeated rendering (benchmark mode)
+    var cachedTexture: MTLTexture?
+    var cachedTextureWidth: Int = 0
+    var cachedTextureHeight: Int = 0
+
+    /// Cached depth texture for early-Z culling
+    var cachedDepthTexture: MTLTexture?
+
+    /// Preallocated MTLDepthStencilState
+    var depthState: MTLDepthStencilState?
     
     // MARK: - Initialization
     
@@ -82,6 +93,9 @@ public class OffscreenRenderer {
         } catch {
             throw OffscreenRenderError.pipelineCreationFailed(String(describing: error))
         }
+
+        // No depth state for alpha-blended Gaussian splatting
+        self.depthState = nil
     }
     
     // MARK: - Gaussian Management
@@ -141,16 +155,15 @@ public class OffscreenRenderer {
     }
     
     // MARK: - Rendering
-    
-    /// Render a single frame
-    /// - Parameter viewMatrix: View-projection matrix (defaults to identity)
-    public func render(viewMatrix: simd_float4x4 = matrix_identity_float4x4) {
-        guard let buffer = gaussianBuffer else {
-            print("Warning: No Gaussian buffer set. Call setGaussians() or createTestGaussians() first.")
-            return
+
+    /// Get or create cached render texture + depth texture
+    private func getCachedTexture() -> MTLTexture? {
+        if let tex = cachedTexture,
+           cachedTextureWidth == width,
+           cachedTextureHeight == height {
+            return tex
         }
-        
-        // Create offscreen texture
+
         let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
             width: width,
@@ -159,54 +172,134 @@ public class OffscreenRenderer {
         )
         textureDescriptor.usage = [.renderTarget, .shaderRead]
         textureDescriptor.storageMode = .managed
-        
+
         guard let texture = device.makeTexture(descriptor: textureDescriptor) else {
-            print("Error: Failed to create offscreen texture")
-            return
+            return nil
         }
-        
-        // Create render pass
+
+        // Create matching depth texture
+        let depthDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .depth32Float,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        depthDescriptor.usage = [.renderTarget]
+        depthDescriptor.storageMode = .private
+        cachedDepthTexture = device.makeTexture(descriptor: depthDescriptor)
+
+        cachedTexture = texture
+        cachedTextureWidth = width
+        cachedTextureHeight = height
+        return texture
+    }
+
+    /// Build a MTLRenderPassDescriptor for the given texture + depth
+    private func makeRenderPass(
+        texture: MTLTexture,
+        depthTexture: MTLTexture?,
+        storeAction: MTLStoreAction = .store
+    ) -> MTLRenderPassDescriptor {
         let renderPass = MTLRenderPassDescriptor()
         renderPass.colorAttachments[0].texture = texture
         renderPass.colorAttachments[0].loadAction = .clear
-        renderPass.colorAttachments[0].storeAction = .store
-        renderPass.colorAttachments[0].clearColor = MTLClearColor(red: 0.05, green: 0.05, blue: 0.1, alpha: 1.0)
-        
-        // Create command buffer and encoder
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            print("Error: Failed to create command buffer")
-            return
+        renderPass.colorAttachments[0].storeAction = storeAction
+        renderPass.colorAttachments[0].clearColor = MTLClearColor(
+            red: 0.05, green: 0.05, blue: 0.1, alpha: 1.0
+        )
+
+        // Only set depth attachment if depthState is set
+        if depthState != nil, let depthTex = depthTexture {
+            renderPass.depthAttachment.texture = depthTex
+            renderPass.depthAttachment.loadAction = .clear
+            renderPass.depthAttachment.storeAction = .dontCare
+            renderPass.depthAttachment.clearDepth = 1.0
         }
-        
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-            print("Error: Failed to create render encoder")
-            return
-        }
-        
-        // Set pipeline and buffers
+        return renderPass
+    }
+
+    /// Common draw call setup (shared)
+    private func encodeDraw(
+        encoder: MTLRenderCommandEncoder,
+        buffer: MTLBuffer,
+        viewMatrix: simd_float4x4
+    ) {
         encoder.setRenderPipelineState(pipelineState)
+        if let ds = depthState {
+            encoder.setDepthStencilState(ds)
+        }
         encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-        
+
         var viewProj = viewMatrix
         encoder.setVertexBytes(&viewProj, length: MemoryLayout<simd_float4x4>.size, index: 1)
-        
-        var viewportSize = SIMD2<Float>(Float(width), Float(height))
-        encoder.setVertexBytes(&viewportSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
-        
-        // Draw
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: gaussianCount)
+
+        var vpSize = SIMD2<Float>(Float(width), Float(height))
+        encoder.setVertexBytes(&vpSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6,
+                                instanceCount: gaussianCount)
+    }
+
+    /// Render a single frame (syncs pixel data back to CPU for PNG save)
+    public func render(viewMatrix: simd_float4x4 = matrix_identity_float4x4) {
+        guard let buffer = gaussianBuffer,
+              let texture = getCachedTexture(),
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            return
+        }
+        let pass = makeRenderPass(
+            texture: texture, depthTexture: cachedDepthTexture, storeAction: .store
+        )
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            return
+        }
+        encodeDraw(encoder: encoder, buffer: buffer, viewMatrix: viewMatrix)
         encoder.endEncoding()
-        
-        // Store texture for later pixel access
-        self.lastRenderedTexture = texture
-        
-        // Synchronize managed texture
-        let blitEncoder = commandBuffer.makeBlitCommandEncoder()
-        blitEncoder?.synchronize(resource: texture)
-        blitEncoder?.endEncoding()
-        
+
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.synchronize(resource: texture)
+            blit.endEncoding()
+        }
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        self.lastRenderedTexture = texture
+    }
+
+    /// Helper: create a command buffer + render encoder
+    private func makeCommandBufferAndEncoder(
+        for texture: MTLTexture,
+        depth depthTex: MTLTexture?,
+        storeAction: MTLStoreAction
+    ) -> MTLRenderCommandEncoder? {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return nil }
+        let pass = makeRenderPass(texture: texture, depthTexture: depthTex, storeAction: storeAction)
+        return commandBuffer.makeRenderCommandEncoder(descriptor: pass)
+    }
+
+    /// Fast render for benchmarking - no CPU sync, no pixel readback
+    public func renderFast(viewMatrix: simd_float4x4 = matrix_identity_float4x4) {
+        guard let buffer = gaussianBuffer,
+              let texture = getCachedTexture(),
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            return
+        }
+        let pass = makeRenderPass(
+            texture: texture, depthTexture: cachedDepthTexture, storeAction: .dontCare
+        )
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            return
+        }
+        encodeDraw(encoder: encoder, buffer: buffer, viewMatrix: viewMatrix)
+        encoder.endEncoding()
+        commandBuffer.commit()
+    }
+
+    /// Wait for all previously submitted GPU work to complete
+    public func waitForGPU() {
+        if let commandBuffer = commandQueue.makeCommandBuffer() {
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
     }
     
     // MARK: - PNG Export

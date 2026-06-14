@@ -17,7 +17,7 @@ class GaussianRenderer: NSObject, MTKViewDelegate {
     let commandQueue: MTLCommandQueue
     let pipelineState: MTLRenderPipelineState
 
-    var gaussianCount: Int = 150_000
+    var gaussianCount: Int = 1_000_000
     var gaussianBuffer: MTLBuffer!
 
     var lastFrameTime = CFAbsoluteTimeGetCurrent()
